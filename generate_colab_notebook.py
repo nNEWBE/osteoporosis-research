@@ -812,77 +812,159 @@ else:
     add_md("""## 13. Test With Your Own New Images (Interactive Diagnostic Demo)
 Upload any new, unseen Knee X-ray radiograph to get an instant diagnosis and fuzzy confidence breakdown.""")
 
-    add_code("""from google.colab import files
-from PIL import Image
+    add_code("""import os
 import io
-import os
 import glob
 import numpy as np
 import matplotlib.pyplot as plt
+from PIL import Image
+from google.colab import files
 import torch
+import torch.nn as nn
+from torchvision import transforms, models
 
-print("📸 Click 'Choose Files' below to upload a new Knee X-ray (or test existing images):")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# 1. Image Preprocessing
+eval_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+# 2. Re-create Model Architectures if not in memory
+def _build_res():
+    m = models.resnet101(weights=None)
+    m.fc = nn.Sequential(
+        nn.Dropout(0.3), nn.Linear(m.fc.in_features, 256), nn.ReLU(),
+        nn.BatchNorm1d(256), nn.Dropout(0.15), nn.Linear(256, 2)
+    )
+    return m
+
+def _build_dense():
+    m = models.densenet201(weights=None)
+    m.classifier = nn.Sequential(
+        nn.Dropout(0.3), nn.Linear(m.classifier.in_features, 256), nn.ReLU(),
+        nn.BatchNorm1d(256), nn.Dropout(0.15), nn.Linear(256, 2)
+    )
+    return m
+
+# Auto-locate model checkpoints (local or Drive)
+if 'resnet_model' not in globals() or 'densenet_model' not in globals():
+    res_candidates = ["./checkpoints/best_resnet101.pth", "/content/drive/MyDrive/Osteoporosis_Models/best_resnet101.pth"]
+    den_candidates = ["./checkpoints/best_densenet201.pth", "/content/drive/MyDrive/Osteoporosis_Models/best_densenet201.pth"]
+
+    res_ckpt = next((p for p in res_candidates if os.path.exists(p)), None)
+    den_ckpt = next((p for p in den_candidates if os.path.exists(p)), None)
+
+    if res_ckpt is None or den_ckpt is None:
+        try:
+            from google.colab import drive
+            drive.mount('/content/drive')
+            res_ckpt = next((p for p in res_candidates if os.path.exists(p)), None)
+            den_ckpt = next((p for p in den_candidates if os.path.exists(p)), None)
+        except:
+            pass
+
+    if res_ckpt and den_ckpt:
+        print(f"Loading weights from:\n  ResNet: {res_ckpt}\n  DenseNet: {den_ckpt}")
+        resnet_model = _build_res().to(device)
+        densenet_model = _build_dense().to(device)
+        resnet_model.load_state_dict(torch.load(res_ckpt, map_location=device))
+        densenet_model.load_state_dict(torch.load(den_ckpt, map_location=device))
+        resnet_model.eval()
+        densenet_model.eval()
+    else:
+        raise FileNotFoundError(
+            "❌ Model weights not found in './checkpoints/' or Google Drive!\\n"
+            "Please run the training cells above (Section 6 & 7) once so weights are created."
+        )
+
+# 3. Fuzzy Logic Engine
+class StandaloneFuzzy:
+    def __init__(self):
+        self.y = np.linspace(0.0, 1.0, 101)
+        self.out_l = np.clip((0.40 - self.y)/0.25, 0.0, 1.0); self.out_l[self.y<=0.15] = 1.0; self.out_l[self.y>=0.40] = 0.0
+        self.out_m = np.clip(np.maximum(0.0, np.minimum((self.y-0.25)/0.25, (0.75-self.y)/0.25)), 0.0, 1.0)
+        self.out_h = np.clip((self.y-0.60)/0.25, 0.0, 1.0); self.out_h[self.y>=0.85] = 1.0; self.out_h[self.y<=0.60] = 0.0
+
+    def predict(self, p1, p2):
+        l1, m1, h1 = self._fuzz(p1)
+        l2, m2, h2 = self._fuzz(p2)
+        w = [min(l1,l2), min(l1,m2), min(l1,h2), min(m1,l2), min(m1,m2), min(m1,h2), min(h1,l2), min(h1,m2), min(h1,h2)]
+        agg = np.maximum.reduce([
+            np.minimum(max(w[0],w[1],w[3]), self.out_l),
+            np.minimum(max(w[2],w[4],w[6]), self.out_m),
+            np.minimum(max(w[5],w[7],w[8]), self.out_h)
+        ])
+        den = np.sum(agg)
+        return float(np.sum(agg * self.y) / (den + 1e-9)) if den > 1e-7 else float(0.5*(p1+p2))
+
+    def _fuzz(self, x):
+        l = max(0.0, min(1.0, (0.40-x)/0.25)) if x > 0.15 else 1.0
+        if x >= 0.40: l = 0.0
+        m = max(0.0, min((x-0.25)/0.25, (0.75-x)/0.25))
+        h = max(0.0, min(1.0, (x-0.60)/0.25)) if x < 0.85 else 1.0
+        if x <= 0.60: h = 0.0
+        return l, m, h
+
+fuzzy_engine = StandaloneFuzzy()
+best_tau = 0.30
+
+# 4. Interactive File Chooser or Auto-Detector
+print("\\n📸 Click 'Choose Files' to upload a new Knee X-Ray:")
 uploaded = files.upload()
 
-# Collect files to test (uploaded via button OR dragged into files panel)
-images_to_test = []
+images_to_run = []
 if uploaded:
     for fname in uploaded.keys():
-        images_to_test.append((fname, Image.open(io.BytesIO(uploaded[fname])).convert("RGB")))
+        images_to_run.append((fname, Image.open(io.BytesIO(uploaded[fname])).convert("RGB")))
 else:
     # Check for image files in current folder
     panel_files = sorted(glob.glob("*.jpeg") + glob.glob("*.jpg") + glob.glob("*.png"))
     for pf in panel_files:
         if "figure" not in pf.lower():
-            images_to_test.append((pf, Image.open(pf).convert("RGB")))
+            images_to_run.append((pf, Image.open(pf).convert("RGB")))
 
-if not images_to_test:
-    print("⚠️ No images found to test! Please click 'Choose Files' or drag images into Colab.")
+if not images_to_run:
+    print("⚠️ No images selected or found in panel.")
 else:
-    print(f"Diagnosing {len(images_to_test)} image(s)...\\n")
+    for filename, img in images_to_run:
+        tensor = eval_transform(img).unsqueeze(0).to(device)
+        with torch.no_grad():
+            p_res = float(torch.softmax(resnet_model(tensor), dim=1)[0, 1].cpu().item())
+            p_den = float(torch.softmax(densenet_model(tensor), dim=1)[0, 1].cpu().item())
 
-best_tau = 0.30
+        p_fuz = fuzzy_engine.predict(p_res, p_den)
+        diagnosis = "OSTEOPOROSIS" if p_fuz >= best_tau else "NORMAL"
+        diag_color = "#c0392b" if diagnosis == "OSTEOPOROSIS" else "#27ae60"
 
-for filename, img in images_to_test:
-    tensor = eval_transform(img).unsqueeze(0).to(device)
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+        ax1.imshow(img, cmap="gray")
+        ax1.set_title(f"Target: {filename}", fontsize=11, fontweight="bold")
+        ax1.axis("off")
 
-    # 1. Individual Backbone Probabilities
-    with torch.no_grad():
-        p_res = float(torch.softmax(resnet_model(tensor), dim=1)[0, 1].cpu().item())
-        p_den = float(torch.softmax(densenet_model(tensor), dim=1)[0, 1].cpu().item())
+        models_names = ["ResNet-101", "DenseNet-201", "Fuzzy Fusion"]
+        scores = [p_res, p_den, p_fuz]
+        bars = ax2.barh(models_names, scores, color=["#2980b9", "#8e44ad", diag_color], height=0.5)
+        ax2.axvline(best_tau, color="black", linestyle="--", label=f"Threshold (tau={best_tau:.2f})")
+        ax2.set_xlim(0, 1.0)
+        ax2.set_xlabel("Osteoporosis Probability")
+        ax2.set_title(f"Clinical Diagnosis: {diagnosis} ({p_fuz*100:.1f}%)", fontweight="bold", color=diag_color)
+        ax2.legend(loc="lower right")
 
-    # 2. Fuzzy Fusion
-    p_fuz = float(fuzzy_engine.predict_proba(np.array([p_res]), np.array([p_den]))[0]) if 'fuzzy_engine' in globals() else 0.5*(p_res+p_den)
-    diagnosis = "OSTEOPOROSIS" if p_fuz >= best_tau else "NORMAL"
-    diag_color = "#c0392b" if diagnosis == "OSTEOPOROSIS" else "#27ae60"
+        for bar in bars:
+            w = bar.get_width()
+            ax2.text(w + 0.02, bar.get_y() + bar.get_height()/2, f"{w*100:.1f}%", va="center", fontweight="bold")
 
-    # 3. Visual Diagnosis Plot
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
-    ax1.imshow(img, cmap="gray")
-    ax1.set_title(f"Target: {filename}", fontsize=11, fontweight="bold")
-    ax1.axis("off")
+        plt.tight_layout()
+        plt.show()
 
-    models_names = ["ResNet-101", "DenseNet-201", "Fuzzy Fusion"]
-    scores = [p_res, p_den, p_fuz]
-    bars = ax2.barh(models_names, scores, color=["#2980b9", "#8e44ad", diag_color], height=0.5)
-    ax2.axvline(best_tau, color="black", linestyle="--", label=f"Threshold (tau={best_tau:.2f})")
-    ax2.set_xlim(0, 1.0)
-    ax2.set_xlabel("Osteoporosis Probability")
-    ax2.set_title(f"Clinical Diagnosis: {diagnosis} ({p_fuz*100:.1f}%)", fontweight="bold", color=diag_color)
-    ax2.legend(loc="lower right")
-
-    for bar in bars:
-        w = bar.get_width()
-        ax2.text(w + 0.02, bar.get_y() + bar.get_height()/2, f"{w*100:.1f}%", va="center", fontweight="bold")
-
-    plt.tight_layout()
-    plt.show()
-
-    print("=" * 55)
-    print(f"IMAGE:                  {filename}")
-    print(f"FINAL CLINICAL OPINION: >> {diagnosis} <<")
-    print(f"FUZZY CONFIDENCE:       {p_fuz*100:.2f}%")
-    print("=" * 55)
+        print("=" * 55)
+        print(f"IMAGE:                  {filename}")
+        print(f"FINAL CLINICAL OPINION: >> {diagnosis} <<")
+        print(f"FUZZY CONFIDENCE:       {p_fuz*100:.2f}%")
+        print("=" * 55)
 """)
 
     out_path = "Osteoporosis_Fuzzy_Fusion_Colab.ipynb"
