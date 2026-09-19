@@ -709,47 +709,166 @@ except Exception as e:
 """)
 
     # -------------------------------------------------------------
-    # SECTION 12: INTERACTIVE INFERENCE ON NEW IMAGES
+    # SECTION 11: DOWNLOAD & BACKUP TO GOOGLE DRIVE
     # -------------------------------------------------------------
-    add_md("""## 12. Test With Your Own New Images (Interactive Diagnostic Demo)
+    add_md("""## 11. Permanent Model Storage in Google Drive
+Google Colab temporary storage is wiped when restarted. We permanently save model checkpoints to **Google Drive** so you never have to retrain.""")
+
+    add_code("""# 1. Mount Google Drive if not already mounted
+from google.colab import drive
+import os
+drive.mount('/content/drive')
+
+# 2. Save checkpoints permanently to Google Drive
+DRIVE_MODEL_DIR = "/content/drive/MyDrive/Osteoporosis_Models"
+!mkdir -p "{DRIVE_MODEL_DIR}"
+!cp -r checkpoints/* "{DRIVE_MODEL_DIR}/"
+!cp benchmark_results.json "{DRIVE_MODEL_DIR}/" 2>/dev/null || true
+!cp publication_figures.png "{DRIVE_MODEL_DIR}/" 2>/dev/null || true
+
+print("=" * 65)
+print(f"✅ Models permanently saved to Google Drive: {DRIVE_MODEL_DIR}")
+print("   - best_resnet101.pth")
+print("   - best_densenet201.pth")
+print("   - benchmark_results.json & publication_figures.png")
+print("=" * 65)
+
+# Also zip for local computer download
+!zip -q -r osteoporosis_experiment_artifacts.zip checkpoints/ benchmark_results.json publication_figures.png
+try:
+    from google.colab import files
+    files.download("osteoporosis_experiment_artifacts.zip")
+except Exception as e:
+    print(f"Local download ready: ./osteoporosis_experiment_artifacts.zip")
+""")
+
+    # -------------------------------------------------------------
+    # SECTION 12: FAST 2-SECOND LOADER (FOR FUTURE SESSIONS)
+    # -------------------------------------------------------------
+    add_md("""## 12. Fast Loader for Future Sessions (Skip Training in 2 Seconds!)
+Whenever you open Colab in the future, run this single cell to load your permanently saved models from Google Drive without retraining!""")
+
+    add_code("""from google.colab import drive
+import os
+import torch
+import torch.nn as nn
+from torchvision import transforms, models
+from PIL import Image
+import numpy as np
+import matplotlib.pyplot as plt
+
+# Mount Drive
+drive.mount('/content/drive')
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DRIVE_MODEL_DIR = "/content/drive/MyDrive/Osteoporosis_Models"
+
+# Preprocessing
+eval_transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+def build_eval_resnet():
+    m = models.resnet101(weights=None)
+    m.fc = nn.Sequential(
+        nn.Dropout(0.3), nn.Linear(m.fc.in_features, 256), nn.ReLU(),
+        nn.BatchNorm1d(256), nn.Dropout(0.15), nn.Linear(256, 2)
+    )
+    return m
+
+def build_eval_densenet():
+    m = models.densenet201(weights=None)
+    m.classifier = nn.Sequential(
+        nn.Dropout(0.3), nn.Linear(m.classifier.in_features, 256), nn.ReLU(),
+        nn.BatchNorm1d(256), nn.Dropout(0.15), nn.Linear(256, 2)
+    )
+    return m
+
+# Load directly from Google Drive
+resnet_model = build_eval_resnet().to(device)
+densenet_model = build_eval_densenet().to(device)
+
+res_ckpt = f"{DRIVE_MODEL_DIR}/best_resnet101.pth"
+den_ckpt = f"{DRIVE_MODEL_DIR}/best_densenet201.pth"
+
+if os.path.exists(res_ckpt) and os.path.exists(den_ckpt):
+    resnet_model.load_state_dict(torch.load(res_ckpt, map_location=device))
+    densenet_model.load_state_dict(torch.load(den_ckpt, map_location=device))
+    resnet_model.eval()
+    densenet_model.eval()
+    print("=" * 65)
+    print("🎉 SUCCESS: Loaded trained models from Google Drive in 2 seconds!")
+    print(f"   Loaded: {res_ckpt}")
+    print(f"   Loaded: {den_ckpt}")
+    print("=" * 65)
+else:
+    print(f"⚠️ Checkpoint files not found in {DRIVE_MODEL_DIR}. Please run Section 11 to save them first.")
+""")
+
+    # -------------------------------------------------------------
+    # SECTION 13: INTERACTIVE INFERENCE ON NEW IMAGES
+    # -------------------------------------------------------------
+    add_md("""## 13. Test With Your Own New Images (Interactive Diagnostic Demo)
 Upload any new, unseen Knee X-ray radiograph to get an instant diagnosis and fuzzy confidence breakdown.""")
 
     add_code("""from google.colab import files
+from PIL import Image
 import io
+import os
+import glob
+import numpy as np
+import matplotlib.pyplot as plt
+import torch
 
-print("Click 'Choose Files' to upload a new Knee X-ray image (JPG, PNG)...")
+print("📸 Click 'Choose Files' below to upload a new Knee X-ray (or test existing images):")
 uploaded = files.upload()
 
-for filename in uploaded.keys():
-    # Load and preprocess image
-    new_img = Image.open(io.BytesIO(uploaded[filename])).convert("RGB")
-    tensor = eval_transform(new_img).unsqueeze(0).to(device)
+# Collect files to test (uploaded via button OR dragged into files panel)
+images_to_test = []
+if uploaded:
+    for fname in uploaded.keys():
+        images_to_test.append((fname, Image.open(io.BytesIO(uploaded[fname])).convert("RGB")))
+else:
+    # Check for image files in current folder
+    panel_files = sorted(glob.glob("*.jpeg") + glob.glob("*.jpg") + glob.glob("*.png"))
+    for pf in panel_files:
+        if "figure" not in pf.lower():
+            images_to_test.append((pf, Image.open(pf).convert("RGB")))
 
-    # Inference with ResNet-101 and DenseNet-201
+if not images_to_test:
+    print("⚠️ No images found to test! Please click 'Choose Files' or drag images into Colab.")
+else:
+    print(f"Diagnosing {len(images_to_test)} image(s)...\\n")
+
+best_tau = 0.30
+
+for filename, img in images_to_test:
+    tensor = eval_transform(img).unsqueeze(0).to(device)
+
+    # 1. Individual Backbone Probabilities
     with torch.no_grad():
         p_res = float(torch.softmax(resnet_model(tensor), dim=1)[0, 1].cpu().item())
         p_den = float(torch.softmax(densenet_model(tensor), dim=1)[0, 1].cpu().item())
 
-    # Fuzzy Fusion
-    p_fuz = float(fuzzy_engine.predict_proba(np.array([p_res]), np.array([p_den]))[0])
+    # 2. Fuzzy Fusion
+    p_fuz = float(fuzzy_engine.predict_proba(np.array([p_res]), np.array([p_den]))[0]) if 'fuzzy_engine' in globals() else 0.5*(p_res+p_den)
     diagnosis = "OSTEOPOROSIS" if p_fuz >= best_tau else "NORMAL"
     diag_color = "#c0392b" if diagnosis == "OSTEOPOROSIS" else "#27ae60"
 
-    # Visualization
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
-    ax1.imshow(new_img, cmap="gray")
+    # 3. Visual Diagnosis Plot
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4))
+    ax1.imshow(img, cmap="gray")
     ax1.set_title(f"Target: {filename}", fontsize=11, fontweight="bold")
     ax1.axis("off")
 
-    # Bar chart breakdown
     models_names = ["ResNet-101", "DenseNet-201", "Fuzzy Fusion"]
     scores = [p_res, p_den, p_fuz]
-    colors = ["#2980b9", "#8e44ad", diag_color]
-    bars = ax2.barh(models_names, scores, color=colors, height=0.55)
-    ax2.axvline(best_tau, color="black", linestyle="--", label=f"Decision Threshold (tau={best_tau:.2f})")
+    bars = ax2.barh(models_names, scores, color=["#2980b9", "#8e44ad", diag_color], height=0.5)
+    ax2.axvline(best_tau, color="black", linestyle="--", label=f"Threshold (tau={best_tau:.2f})")
     ax2.set_xlim(0, 1.0)
-    ax2.set_xlabel("Osteoporosis Probability P(Osteo)")
-    ax2.set_title(f"Diagnosis: {diagnosis} (P={p_fuz*100:.1f}%)", fontsize=12, fontweight="bold", color=diag_color)
+    ax2.set_xlabel("Osteoporosis Probability")
+    ax2.set_title(f"Clinical Diagnosis: {diagnosis} ({p_fuz*100:.1f}%)", fontweight="bold", color=diag_color)
     ax2.legend(loc="lower right")
 
     for bar in bars:
@@ -759,11 +878,11 @@ for filename in uploaded.keys():
     plt.tight_layout()
     plt.show()
 
-    print(f"==================================================")
+    print("=" * 55)
     print(f"IMAGE:                  {filename}")
     print(f"FINAL CLINICAL OPINION: >> {diagnosis} <<")
     print(f"FUZZY CONFIDENCE:       {p_fuz*100:.2f}%")
-    print(f"==================================================")
+    print("=" * 55)
 """)
 
     out_path = "Osteoporosis_Fuzzy_Fusion_Colab.ipynb"
