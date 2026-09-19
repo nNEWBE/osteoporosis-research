@@ -1,0 +1,34 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large Datasets & Archives (Exceeds GitHub 100MB limit)
+OS Collected Data/
+OS Collected Data.zip
+*.zip
+*.tar.gz
+*.rar
+
+# Model Checkpoints & Large Weights
+*.pth
+*.pt
+*.onnx
+checkpoints/
+
+# Jupyter Notebook Checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# Environment & IDE
+.env
+.venv/
+env/
+venv/
+.vscode/
+.idea/
+
+# OS Specific
+Thumbs.db
+Desktop.ini
+.DS_Store
