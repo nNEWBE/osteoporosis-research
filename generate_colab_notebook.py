@@ -708,6 +708,64 @@ except Exception as e:
     print(f"File ready for download at: ./osteoporosis_experiment_artifacts.zip ({e})")
 """)
 
+    # -------------------------------------------------------------
+    # SECTION 12: INTERACTIVE INFERENCE ON NEW IMAGES
+    # -------------------------------------------------------------
+    add_md("""## 12. Test With Your Own New Images (Interactive Diagnostic Demo)
+Upload any new, unseen Knee X-ray radiograph to get an instant diagnosis and fuzzy confidence breakdown.""")
+
+    add_code("""from google.colab import files
+import io
+
+print("Click 'Choose Files' to upload a new Knee X-ray image (JPG, PNG)...")
+uploaded = files.upload()
+
+for filename in uploaded.keys():
+    # Load and preprocess image
+    new_img = Image.open(io.BytesIO(uploaded[filename])).convert("RGB")
+    tensor = eval_transform(new_img).unsqueeze(0).to(device)
+
+    # Inference with ResNet-101 and DenseNet-201
+    with torch.no_grad():
+        p_res = float(torch.softmax(resnet_model(tensor), dim=1)[0, 1].cpu().item())
+        p_den = float(torch.softmax(densenet_model(tensor), dim=1)[0, 1].cpu().item())
+
+    # Fuzzy Fusion
+    p_fuz = float(fuzzy_engine.predict_proba(np.array([p_res]), np.array([p_den]))[0])
+    diagnosis = "OSTEOPOROSIS" if p_fuz >= best_tau else "NORMAL"
+    diag_color = "#c0392b" if diagnosis == "OSTEOPOROSIS" else "#27ae60"
+
+    # Visualization
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
+    ax1.imshow(new_img, cmap="gray")
+    ax1.set_title(f"Target: {filename}", fontsize=11, fontweight="bold")
+    ax1.axis("off")
+
+    # Bar chart breakdown
+    models_names = ["ResNet-101", "DenseNet-201", "Fuzzy Fusion"]
+    scores = [p_res, p_den, p_fuz]
+    colors = ["#2980b9", "#8e44ad", diag_color]
+    bars = ax2.barh(models_names, scores, color=colors, height=0.55)
+    ax2.axvline(best_tau, color="black", linestyle="--", label=f"Decision Threshold (tau={best_tau:.2f})")
+    ax2.set_xlim(0, 1.0)
+    ax2.set_xlabel("Osteoporosis Probability P(Osteo)")
+    ax2.set_title(f"Diagnosis: {diagnosis} (P={p_fuz*100:.1f}%)", fontsize=12, fontweight="bold", color=diag_color)
+    ax2.legend(loc="lower right")
+
+    for bar in bars:
+        w = bar.get_width()
+        ax2.text(w + 0.02, bar.get_y() + bar.get_height()/2, f"{w*100:.1f}%", va="center", fontweight="bold")
+
+    plt.tight_layout()
+    plt.show()
+
+    print(f"==================================================")
+    print(f"IMAGE:                  {filename}")
+    print(f"FINAL CLINICAL OPINION: >> {diagnosis} <<")
+    print(f"FUZZY CONFIDENCE:       {p_fuz*100:.2f}%")
+    print(f"==================================================")
+""")
+
     out_path = "Osteoporosis_Fuzzy_Fusion_Colab.ipynb"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(nb, f, indent=2)
